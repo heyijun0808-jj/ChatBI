@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>五子棋 — 人机对战</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: #eee;
+    }
+
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 12px;
+      letter-spacing: 4px;
+      color: #e2b96f;
+      text-shadow: 0 0 10px rgba(226,185,111,0.5);
+    }
+
+    #info-bar {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 1rem;
+    }
+
+    #status {
+      font-size: 1.1rem;
+      font-weight: bold;
+      color: #7ecfff;
+      min-width: 180px;
+      text-align: center;
+    }
+
+    #turn-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .stone-icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: inline-block;
+      border: 2px solid #888;
+    }
+    .stone-icon.black { background: radial-gradient(circle at 35% 35%, #888, #111); }
+    .stone-icon.white { background: radial-gradient(circle at 35% 35%, #fff, #bbb); }
+
+    #board-wrapper {
+      position: relative;
+      padding: 6px;
+      background: #16213e;
+      border-radius: 8px;
+      box-shadow: 0 0 30px rgba(0,0,0,0.6);
+    }
+
+    canvas {
+      display: block;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    canvas.disabled { cursor: not-allowed; }
+
+    #controls {
+      display: flex;
+      gap: 14px;
+      margin-top: 14px;
+      align-items: center;
+    }
+
+    button {
+      padding: 8px 22px;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.1s, box-shadow 0.1s;
+    }
+    button:active { transform: scale(0.96); }
+
+    #btn-restart {
+      background: #e2b96f;
+      color: #1a1a2e;
+      font-weight: bold;
+      box-shadow: 0 3px 8px rgba(226,185,111,0.4);
+    }
+    #btn-restart:hover { box-shadow: 0 5px 14px rgba(226,185,111,0.6); }
+
+    #side-select label {
+      cursor: pointer;
+      margin-right: 6px;
+      font-size: 0.9rem;
+      color: #ccc;
+    }
+    #side-select select {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #16213e;
+      color: #eee;
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+
+    #move-count {
+      font-size: 0.85rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <h1>五 子 棋</h1>
+
+  <div id="info-bar">
+    <div id="turn-indicator">
+      <span class="stone-icon black"></span>
+      <span id="status">黑棋先走</span>
+    </div>
+    <span id="move-count">第 0 手</span>
+  </div>
+
+  <div id="board-wrapper">
+    <canvas id="board"></canvas>
+  </div>
+
+  <div id="controls">
+    <div id="side-select">
+      <label for="player-side">我执：</label>
+      <select id="player-side">
+        <option value="black">黑棋（先手）</option>
+        <option value="white">白棋（后手）</option>
+      </select>
+    </div>
+    <button id="btn-restart">重新开始</button>
+  </div>
+
+  <script>
+  (() => {
+    /* ─── Constants ─────────────────────────────────────────── */
+    const SIZE     = 15;          // board intersections
+    const CELL     = 40;          // pixels per cell
+    const PAD      = 30;          // board padding (pixels)
+    const RADIUS   = 17;          // stone radius
+    const CANVAS_W = CELL * (SIZE - 1) + PAD * 2;
+
+    const BLACK = 1, WHITE = 2, EMPTY = 0;
+
+    /* Score table for consecutive patterns (count, openEnds) */
+    const SCORE = {
+      five:       100000,
+      four_open:   10000,
+      four_closed:  1000,
+      three_open:    500,
+      three_closed:   50,
+      two_open:       10,
+      two_closed:      1,
+    };
+
+    /* ─── State ──────────────────────────────────────────────── */
+    let board     = [];   // board[r][c] = BLACK | WHITE | EMPTY
+    let moveCount = 0;
+    let gameOver  = false;
+    let currentTurn = BLACK;   // whose turn it is right now
+    let playerColor = BLACK;   // the human's color
+    let aiColor     = WHITE;
+
+    /* ─── DOM ────────────────────────────────────────────────── */
+    const canvas   = document.getElementById("board");
+    const ctx      = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const moveEl   = document.getElementById("move-count");
+    const sideEl   = document.getElementById("player-side");
+    const restartBtn = document.getElementById("btn-restart");
+
+    canvas.width  = CANVAS_W;
+    canvas.height = CANVAS_W;
+
+    /* ─── Init ───────────────────────────────────────────────── */
+    function initGame() {
+      board = Array.from({ length: SIZE }, () => new Array(SIZE).fill(EMPTY));
+      moveCount = 0;
+      gameOver  = false;
+      currentTurn = BLACK;
+      playerColor = sideEl.value === "black" ? BLACK : WHITE;
+      aiColor     = playerColor === BLACK ? WHITE : BLACK;
+      canvas.classList.remove("disabled");
+      updateStatus();
+      drawBoard();
+      // If AI is black (player chose white), AI goes first
+      if (currentTurn === aiColor) {
+        setTimeout(aiMove, 200);
+      }
+    }
+
+    /* ─── Drawing ────────────────────────────────────────────── */
+    function drawBoard() {
+      // Background (wood colour)
+      ctx.fillStyle = "#c8913a";
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_W);
+
+      // Grid lines
+      ctx.strokeStyle = "#8a5c20";
+      ctx.lineWidth = 1;
+      for (let i = 0; i < SIZE; i++) {
+        const x = PAD + i * CELL;
+        const y = PAD + i * CELL;
+        ctx.beginPath(); ctx.moveTo(x, PAD); ctx.lineTo(x, PAD + (SIZE-1)*CELL); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(PAD + (SIZE-1)*CELL, y); ctx.stroke();
+      }
+
+      // Star points (天元 + 8 星位 for 15×15)
+      const stars = [3, 7, 11];
+      ctx.fillStyle = "#8a5c20";
+      for (const r of stars) {
+        for (const c of stars) {
+          ctx.beginPath();
+          ctx.arc(PAD + c * CELL, PAD + r * CELL, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Stones
+      for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) {
+          if (board[r][c] !== EMPTY) {
+            drawStone(r, c, board[r][c]);
+          }
+        }
+      }
+    }
+
+    function drawStone(r, c, color) {
+      const x = PAD + c * CELL;
+      const y = PAD + r * CELL;
+      const grad = ctx.createRadialGradient(x - RADIUS*0.3, y - RADIUS*0.3, RADIUS*0.05,
+                                             x, y, RADIUS);
+      if (color === BLACK) {
+        grad.addColorStop(0, "#888");
+        grad.addColorStop(1, "#111");
+      } else {
+        grad.addColorStop(0, "#fff");
+        grad.addColorStop(1, "#ccc");
+      }
+      ctx.beginPath();
+      ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.strokeStyle = color === BLACK ? "#000" : "#999";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    function highlightLastMove(r, c) {
+      const x = PAD + c * CELL;
+      const y = PAD + r * CELL;
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = board[r][c] === BLACK ? "#f00" : "#00f";
+      ctx.fill();
+    }
+
+    /* ─── Game Logic ─────────────────────────────────────────── */
+    function placeStone(r, c, color) {
+      board[r][c] = color;
+      moveCount++;
+      moveEl.textContent = `第 ${moveCount} 手`;
+    }
+
+    function checkWin(r, c, color) {
+      const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+      for (const [dr, dc] of dirs) {
+        let cnt = 1;
+        for (let d = 1; d <= 4; d++) {
+          const nr = r + dr*d, nc = c + dc*d;
+          if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] !== color) break;
+          cnt++;
+        }
+        for (let d = 1; d <= 4; d++) {
+          const nr = r - dr*d, nc = c - dc*d;
+          if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE || board[nr][nc] !== color) break;
+          cnt++;
+        }
+        if (cnt >= 5) return true;
+      }
+      return false;
+    }
+
+    function isBoardFull() {
+      return board.every(row => row.every(c => c !== EMPTY));
+    }
+
+    /* ─── AI ──────────────────────────────────────────────────── */
+
+    /** Evaluate a line of cells centred on (r,c) in direction (dr,dc)
+     *  for `color`. Returns a numeric score contribution. */
+    function evalLine(r, c, dr, dc, color) {
+      const opp = color === BLACK ? WHITE : BLACK;
+      let count = 1, openEnds = 0;
+
+      for (let d = 1; d <= 4; d++) {
+        const nr = r + dr*d, nc = c + dc*d;
+        if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE) break;
+        if (board[nr][nc] === color) count++;
+        else { if (board[nr][nc] === EMPTY) openEnds++; break; }
+      }
+      for (let d = 1; d <= 4; d++) {
+        const nr = r - dr*d, nc = c - dc*d;
+        if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE) break;
+        if (board[nr][nc] === color) count++;
+        else { if (board[nr][nc] === EMPTY) openEnds++; break; }
+      }
+
+      if (count >= 5) return SCORE.five;
+      if (count === 4) return openEnds >= 2 ? SCORE.four_open : (openEnds === 1 ? SCORE.four_closed : 0);
+      if (count === 3) return openEnds >= 2 ? SCORE.three_open : (openEnds === 1 ? SCORE.three_closed : 0);
+      if (count === 2) return openEnds >= 2 ? SCORE.two_open  : (openEnds === 1 ? SCORE.two_closed  : 0);
+      return 0;
+    }
+
+    /** Score a candidate position for a given color. */
+    function scorePosition(r, c, color) {
+      if (board[r][c] !== EMPTY) return -1;
+      const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+      let total = 0;
+      board[r][c] = color;   // temporarily place
+      for (const [dr,dc] of dirs) total += evalLine(r, c, dr, dc, color);
+      board[r][c] = EMPTY;
+      return total;
+    }
+
+    function aiMove() {
+      if (gameOver) return;
+
+      let bestScore = -Infinity;
+      let bestMoves = [];
+
+      for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) {
+          if (board[r][c] !== EMPTY) continue;
+
+          // Skip cells far from all existing stones (optimisation)
+          if (moveCount > 0 && !hasNeighbour(r, c, 2)) continue;
+
+          const attackScore  = scorePosition(r, c, aiColor);
+          const defenceScore = scorePosition(r, c, playerColor);
+
+          // Immediate win: take it
+          if (attackScore >= SCORE.five) {
+            placeAndFinish(r, c, aiColor);
+            return;
+          }
+          // Block immediate player win: must defend
+          if (defenceScore >= SCORE.five) {
+            placeAndFinish(r, c, aiColor);
+            return;
+          }
+
+          // Combined heuristic: slightly favour offence
+          const s = attackScore * 1.1 + defenceScore;
+          if (s > bestScore) { bestScore = s; bestMoves = [[r,c]]; }
+          else if (s === bestScore) bestMoves.push([r,c]);
+        }
+      }
+
+      // Fallback: centre
+      if (bestMoves.length === 0) {
+        placeAndFinish(Math.floor(SIZE/2), Math.floor(SIZE/2), aiColor);
+        return;
+      }
+
+      const [r, c] = bestMoves[Math.floor(Math.random() * bestMoves.length)];
+      placeAndFinish(r, c, aiColor);
+    }
+
+    function hasNeighbour(r, c, dist) {
+      for (let dr = -dist; dr <= dist; dr++) {
+        for (let dc = -dist; dc <= dist; dc++) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && board[nr][nc] !== EMPTY) return true;
+        }
+      }
+      return false;
+    }
+
+    function placeAndFinish(r, c, color) {
+      placeStone(r, c, color);
+      drawBoard();
+      highlightLastMove(r, c);
+      if (checkWin(r, c, color)) {
+        gameOver = true;
+        canvas.classList.add("disabled");
+        const winner = color === BLACK ? "黑棋" : "白棋";
+        const tag = color === playerColor ? "🎉 你赢了！" : "😢 AI 获胜！";
+        statusEl.textContent = `${winner}胜利！${tag}`;
+        return;
+      }
+      if (isBoardFull()) {
+        gameOver = true;
+        canvas.classList.add("disabled");
+        statusEl.textContent = "平局！";
+        return;
+      }
+      currentTurn = color === BLACK ? WHITE : BLACK;
+      updateStatus();
+    }
+
+    function updateStatus() {
+      if (gameOver) return;
+      const turnName = currentTurn === BLACK ? "黑棋" : "白棋";
+      const whose    = currentTurn === playerColor ? "你" : "AI";
+      statusEl.textContent = `${turnName}走棋（${whose}）`;
+    }
+
+    /* ─── Human interaction ───────────────────────────────────── */
+    canvas.addEventListener("click", (e) => {
+      if (gameOver || currentTurn !== playerColor) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width  / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const px = (e.clientX - rect.left) * scaleX;
+      const py = (e.clientY - rect.top)  * scaleY;
+
+      const c = Math.round((px - PAD) / CELL);
+      const r = Math.round((py - PAD) / CELL);
+
+      if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return;
+      if (board[r][c] !== EMPTY) return;
+
+      placeAndFinish(r, c, playerColor);
+
+      if (!gameOver) {
+        canvas.classList.add("disabled");
+        setTimeout(() => {
+          canvas.classList.remove("disabled");
+          aiMove();
+        }, 150);
+      }
+    });
+
+    restartBtn.addEventListener("click", initGame);
+    sideEl.addEventListener("change", initGame);
+
+    /* ─── Start ───────────────────────────────────────────────── */
+    initGame();
+  })();
+  </script>
+</body>
+</html>
